@@ -1,0 +1,30 @@
+---
+- name: Search the EVPN spreadsheet for a specific VLAN
+  hosts: localhost
+
+  vars:
+    xls_file: 'evpn_config_template.xlsx'
+
+  tasks:
+    - name: Fail if vlan_id was not passed in as an extra var
+      fail:
+        msg: "Pass the VLAN to search for with -e vlan_id=<number>, e.g. -e vlan_id=100"
+      when: vlan_id is not defined
+
+    - name: Import facts from the XLS file
+      xls_to_facts:
+        src: "{{ xls_file }}"
+
+    - name: Find the matching VLAN row(s)
+      set_fact:
+        matching_vlan: "{{ spreadsheet_VLAN | selectattr('VLAN_ID', 'equalto', vlan_id | int) | list }}"
+
+    - name: Report that the VLAN was not found
+      debug:
+        msg: "VLAN {{ vlan_id }} was not found in {{ xls_file }}"
+      when: matching_vlan | length == 0
+
+    - name: Display the matching VLAN entry
+      debug:
+        var: matching_vlan
+      when: matching_vlan | length > 0
