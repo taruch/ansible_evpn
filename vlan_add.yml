@@ -1,0 +1,63 @@
+---
+# Add a new row to the VLAN sheet CSV export. Reads the existing rows with
+# community.general.read_csv to validate the new VLAN first, then appends the
+# row with ansible.builtin.lineinfile. No Python libraries required.
+#
+# Note: this only updates source_data/csv/vlan.csv. It does not write back to
+# the original .xlsx - re-export from Excel/LibreOffice if you need the
+# spreadsheet itself to stay in sync.
+#
+# Usage:
+#   ansible-playbook vlan_add.yml -e tenant_name=evpn-tenant3 -e vlan_id=1107 -e ip_address=172.16.107.1/24
+#   ansible-playbook vlan_add.yml -e tenant_name=evpn-tenant3 -e vlan_id=1107 \
+#       -e ip_address=172.16.107.1/24 -e vxlan_id=110700 -e mcast_group=224.1.1.1
+
+- name: Add a new VLAN row to the spreadsheet-exported CSV
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars:
+    csv_dir: "{{ playbook_dir }}/source_data/csv"
+    tenant_name: ""
+    vlan_id: ""
+    ip_address: ""
+    vxlan_id: ""
+    mcast_group: "224.1.1.1"
+
+  tasks:
+    - name: Require tenant_name, vlan_id, and ip_address
+      ansible.builtin.assert:
+        that:
+          - tenant_name != ""
+          - vlan_id != ""
+          - ip_address != ""
+        fail_msg: >-
+          Pass -e tenant_name=<name> -e vlan_id=<id> -e ip_address=<cidr>
+          (optionally -e vxlan_id=<id> -e mcast_group=<ip>)
+
+    - name: Default vxlan_id to VLAN_ID x 100 when not given
+      ansible.builtin.set_fact:
+        vxlan_id: "{{ vxlan_id if vxlan_id != '' else (vlan_id | int * 100) }}"
+
+    - name: Read the current VLAN sheet
+      community.general.read_csv:
+        path: "{{ csv_dir }}/vlan.csv"
+      register: vlan_csv
+
+    - name: Fail if the VLAN ID is already in use
+      ansible.builtin.assert:
+        that: vlan_csv.list | selectattr('VLAN_ID', 'equalto', vlan_id | string) | list | length == 0
+        fail_msg: "VLAN {{ vlan_id }} is already assigned - see vlan_lookup.yml -e vlan_id={{ vlan_id }}"
+
+    - name: Append the new VLAN row
+      ansible.builtin.lineinfile:
+        path: "{{ csv_dir }}/vlan.csv"
+        line: "{{ tenant_name }},{{ vlan_id }},{{ vxlan_id }},{{ ip_address }},{{ mcast_group }}"
+        insertafter: EOF
+
+    - name: Confirm the row was added
+      ansible.builtin.debug:
+        msg: >-
+          Added VLAN {{ vlan_id }} (VXLAN {{ vxlan_id }}) for tenant {{ tenant_name }}
+          with SVI {{ ip_address }} and multicast group {{ mcast_group }}
