@@ -1,0 +1,57 @@
+---
+# Look up a single VLAN's details from the VLAN sheet (exported to CSV) using
+# only community.general.read_csv - no Python libraries required.
+#
+# Usage:
+#   ansible-playbook vlan_lookup.yml -e vlan_id=1105
+#   ansible-playbook vlan_lookup.yml -e tenant_name=evpn-tenant2
+
+- name: Look up a VLAN from the spreadsheet-exported CSV
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars:
+    csv_dir: "{{ playbook_dir }}/source_data/csv"
+    vlan_id: ""
+    tenant_name: ""
+
+  tasks:
+    - name: Require either vlan_id or tenant_name
+      ansible.builtin.assert:
+        that: vlan_id != "" or tenant_name != ""
+        fail_msg: "Pass -e vlan_id=<id> or -e tenant_name=<name> to look up a VLAN"
+
+    - name: Read the VLAN sheet
+      community.general.read_csv:
+        path: "{{ csv_dir }}/vlan.csv"
+      register: vlan_csv
+
+    - name: Find the matching VLAN row(s)
+      ansible.builtin.set_fact:
+        matching_vlans: >-
+          {{
+            vlan_csv.list
+            | selectattr('VLAN_ID', 'equalto', vlan_id | string)
+            | list
+            if vlan_id != ""
+            else vlan_csv.list
+            | selectattr('Tenant_Name', 'equalto', tenant_name)
+            | list
+          }}
+
+    - name: Fail if nothing matched
+      ansible.builtin.assert:
+        that: matching_vlans | length > 0
+        fail_msg: "No VLAN found for vlan_id={{ vlan_id }} tenant_name={{ tenant_name }}"
+
+    - name: Show the matching VLAN(s)
+      ansible.builtin.debug:
+        var: matching_vlans
+
+    - name: Example - use the first match's fields directly
+      ansible.builtin.debug:
+        msg: >-
+          Tenant {{ matching_vlans[0].Tenant_Name }} uses VLAN {{ matching_vlans[0].VLAN_ID }}
+          (VXLAN {{ matching_vlans[0].VXLAN_ID }}) with SVI {{ matching_vlans[0].IP_Address }}
+          and multicast group {{ matching_vlans[0].Mcast_group }}

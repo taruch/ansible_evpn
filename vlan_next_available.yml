@@ -1,0 +1,51 @@
+---
+# Find the next free VLAN ID by reading the VLAN sheet (exported to CSV) with
+# community.general.read_csv, then diffing a numeric range against the IDs
+# already in use. No Python libraries required.
+#
+# Usage:
+#   ansible-playbook next_available_vlan.yml
+#   ansible-playbook next_available_vlan.yml -e vlan_range_start=100 -e vlan_range_end=199
+
+- name: Find the next available VLAN ID from the spreadsheet-exported CSV
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars:
+    csv_dir: "{{ playbook_dir }}/source_data/csv"
+    vlan_range_start: 2
+    vlan_range_end: 4094
+
+  tasks:
+    - name: Read the VLAN sheet
+      community.general.read_csv:
+        path: "{{ csv_dir }}/vlan.csv"
+      register: vlan_csv
+
+    - name: Build the list of VLAN IDs already in use
+      ansible.builtin.set_fact:
+        used_vlans: "{{ vlan_csv.list | map(attribute='VLAN_ID') | map('int') | list }}"
+
+    - name: Build the list of candidate VLAN IDs still free in the requested range
+      ansible.builtin.set_fact:
+        available_vlans: >-
+          {{
+            range(vlan_range_start | int, (vlan_range_end | int) + 1)
+            | list
+            | difference(used_vlans)
+            | sort
+          }}
+
+    - name: Fail if the whole range is used up
+      ansible.builtin.assert:
+        that: available_vlans | length > 0
+        fail_msg: >-
+          No free VLAN ID between {{ vlan_range_start }} and {{ vlan_range_end }} -
+          all {{ used_vlans | length }} are in use
+
+    - name: Report the next available VLAN ID
+      ansible.builtin.debug:
+        msg: >-
+          Next available VLAN ID in range {{ vlan_range_start }}-{{ vlan_range_end }}
+          is {{ available_vlans[0] }} ({{ available_vlans | length }} free total)
