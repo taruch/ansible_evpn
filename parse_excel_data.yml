@@ -1,0 +1,77 @@
+---
+# Parse the EVPN config spreadsheet using only community.general.read_csv -
+# no Python libraries (openpyxl, pandas, etc.) need to be added anywhere.
+#
+# Excel can't be read directly by any Ansible module without a Python
+# library, because .xlsx is a zipped-XML binary format. The simplest
+# dependency-free workaround is the one used here:
+#
+#   1. Export each sheet you need from the spreadsheet to its own CSV file
+#      (Excel: File > Save As > CSV for the active sheet, or in LibreOffice
+#      Calc: File > Save As > Text CSV, one sheet at a time). This is a
+#      one-time manual step whenever the source spreadsheet changes.
+#   2. Read each CSV with community.general.read_csv, which only uses
+#      Python's built-in csv module - nothing extra to install.
+#
+# Sample CSVs exported from evpn_config_template.xlsx are provided under
+# source_data/csv/ so this playbook runs out of the box.
+#
+# Requires the community.general collection - see collections/requirements.yml.
+# AAP/AWX installs project collection requirements automatically on project
+# sync, so no custom execution environment is needed for this playbook.
+
+- name: Parse EVPN spreadsheet data exported as CSV
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars:
+    csv_dir: "{{ playbook_dir }}/source_data/csv"
+
+  tasks:
+    - name: Read the Global settings sheet
+      community.general.read_csv:
+        path: "{{ csv_dir }}/global.csv"
+      register: spreadsheet_global
+
+    - name: Read the Switch inventory sheet
+      community.general.read_csv:
+        path: "{{ csv_dir }}/switch.csv"
+      register: spreadsheet_switch
+
+    - name: Read the Uplinks sheet
+      community.general.read_csv:
+        path: "{{ csv_dir }}/uplinks.csv"
+      register: spreadsheet_uplinks
+
+    - name: Read the Tenant sheet
+      community.general.read_csv:
+        path: "{{ csv_dir }}/tenant.csv"
+      register: spreadsheet_tenant
+
+    - name: Read the VLAN sheet
+      community.general.read_csv:
+        path: "{{ csv_dir }}/vlan.csv"
+      register: spreadsheet_vlan
+
+    - name: Read the Access port sheet
+      community.general.read_csv:
+        path: "{{ csv_dir }}/access.csv"
+      register: spreadsheet_access
+
+    - name: Build one fact per spreadsheet sheet, each a list of row dicts
+      ansible.builtin.set_fact:
+        spreadsheet_Global: "{{ spreadsheet_global.list }}"
+        spreadsheet_Switch: "{{ spreadsheet_switch.list }}"
+        spreadsheet_Uplinks: "{{ spreadsheet_uplinks.list }}"
+        spreadsheet_Tenant: "{{ spreadsheet_tenant.list }}"
+        spreadsheet_VLAN: "{{ spreadsheet_vlan.list }}"
+        spreadsheet_Access: "{{ spreadsheet_access.list }}"
+
+    - name: Show the switches found in the spreadsheet
+      ansible.builtin.debug:
+        var: spreadsheet_Switch
+
+    - name: Show uplinks for a specific switch
+      ansible.builtin.debug:
+        msg: "{{ spreadsheet_Uplinks | selectattr('Hostname', 'equalto', 'EVPN-LEAF1') | list }}"
