@@ -1,0 +1,4 @@
+Tenant_Name,L3_VNI_VLAN,L3_VNID
+evpn-tenant1,1110,111000
+evpn-tenant2,1120,112000
+Evpn-tenant3,1130,113000

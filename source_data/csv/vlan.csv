@@ -1,0 +1,3 @@
+Tenant_Name,VLAN_ID,VXLAN_ID,IP_Address,Mcast_group
+evpn-tenant1,1105,110500,172.16.105.1/24,224.1.1.1
+evpn-tenant2,1106,110600,172.16.106.1/24,224.1.1.1

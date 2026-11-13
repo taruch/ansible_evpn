@@ -1,0 +1,5 @@
+Hostname,Interface,Description,Intf_Type,is_vPC_Member,vPC_Nbr,Access_VLAN
+EVPN-LEAF1,Ethernet1/46,Connection to UCS Server,trunk,True,10,
+EVPN-LEAF2,Ethernet1/46,Connection to UCS Server,trunk,True,10,
+EVPN-LEAF3,Ethernet1/46,Connection to UCS Server,trunk,True,10,
+EVPN-LEAF4,Ethernet1/46,Connection to UCS Server,trunk,True,10,
