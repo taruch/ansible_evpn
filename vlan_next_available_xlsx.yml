@@ -1,0 +1,81 @@
+---
+# Find the next free VLAN ID by reading directly from the .xlsx workbook (no
+# CSV export step) with the xls_to_facts module, then diffing a numeric range
+# against the IDs already in use. Mirrors vlan_next_available.yml, which does
+# the same thing from a CSV export - see that playbook's comments for why a
+# CSV-only version also exists.
+#
+# openpyxl must be installed wherever Ansible runs the module - locally via
+# `pip install openpyxl`, or use ansible-navigator with an execution
+# environment image that includes it, e.g.:
+#   ansible-navigator run -mstdout vlan_next_available_xlsx.yml \
+#     -eei=quay.io/truch/ee_spreasheet:1.2
+#
+# Usage:
+#   ansible-playbook vlan_next_available_xlsx.yml
+#   ansible-playbook vlan_next_available_xlsx.yml -e vlan_range_start=100 -e vlan_range_end=199
+#   ansible-playbook vlan_next_available_xlsx.yml -e tab_name=DR
+
+- name: Find the next available VLAN ID directly from the XLSX workbook
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars:
+    xlsx_file: "{{ playbook_dir }}/VLAN-Assignments-TEST-for-Ansible.xlsx"
+    tab_name: DataCenter
+    vlan_range_start: 2
+    vlan_range_end: 4094
+
+  tasks:
+    - name: Read the workbook with the xls_to_facts module
+      xls_to_facts:
+        src: "{{ xlsx_file }}"
+      register: workbook
+
+    - name: Fail if the tab doesn't exist in the workbook
+      ansible.builtin.assert:
+        that: ('spreadsheet_' + tab_name) in workbook.ansible_facts
+        fail_msg: >-
+          Tab '{{ tab_name }}' not found in {{ xlsx_file }}. Available tabs:
+          {{ workbook.ansible_facts.keys() | map('regex_replace', '^spreadsheet_', '') | list }}
+
+    - name: Select the requested tab
+      ansible.builtin.set_fact:
+        vlan_rows: "{{ workbook.ansible_facts['spreadsheet_' + tab_name] }}"
+
+    - name: Build the list of VLAN IDs already in use (rows with an Assignment)
+      ansible.builtin.set_fact:
+        used_vlans: >-
+          {{
+            vlan_rows
+            | rejectattr('Assignment', 'equalto', None)
+            | map(attribute='VLAN')
+            | select('number')
+            | map('int')
+            | list
+          }}
+
+    - name: Build the list of candidate VLAN IDs still free in the requested range
+      ansible.builtin.set_fact:
+        available_vlans: >-
+          {{
+            range(vlan_range_start | int, (vlan_range_end | int) + 1)
+            | list
+            | difference(used_vlans)
+            | sort
+          }}
+
+    - name: Fail if the whole range is used up
+      ansible.builtin.assert:
+        that: available_vlans | length > 0
+        fail_msg: >-
+          No free VLAN ID between {{ vlan_range_start }} and {{ vlan_range_end }}
+          in tab '{{ tab_name }}' - all {{ used_vlans | length }} are in use
+
+    - name: Report the next available VLAN ID
+      ansible.builtin.debug:
+        msg: >-
+          Next available VLAN ID in tab '{{ tab_name }}', range
+          {{ vlan_range_start }}-{{ vlan_range_end }}, is {{ available_vlans[0] }}
+          ({{ available_vlans | length }} free total)

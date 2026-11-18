@@ -1,0 +1,52 @@
+---
+# Example: read an .xlsx workbook directly (no CSV export step) and print a
+# summary of every tab/sheet it contains.
+#
+# This uses the xls_to_facts module already shipped in library/, which wraps
+# openpyxl. It must be installed on whichever Python interpreter Ansible uses
+# to run modules on the target host (here, localhost):
+#
+#   pip install openpyxl
+#
+# Verified working both directly (ansible-playbook with openpyxl installed
+# locally) and via ansible-navigator using the execution environment
+# quay.io/truch/ee_spreasheet:1.2, e.g.:
+#
+#   ansible-navigator run read_xlsx_tabs_example.yml \
+#     --execution-environment-image quay.io/truch/ee_spreasheet:1.2 \
+#     --mode stdout
+#
+# The module returns one ansible_facts entry per sheet, named
+# "spreadsheet_<SheetName>", where each entry is a list of dicts (one dict
+# per data row, keyed by the sheet's header row).
+
+- name: Print the contents of every tab in an XLSX workbook
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars:
+    xlsx_file: "{{ playbook_dir }}/VLAN-Assignments-TEST-for-Ansible.xlsx"
+
+  tasks:
+    - name: Read the workbook with the xls_to_facts module
+      xls_to_facts:
+        src: "{{ xlsx_file }}"
+      register: workbook
+
+    - name: Print a summary of each tab (sheet name, row count, columns)
+      ansible.builtin.debug:
+        msg: >-
+          Tab "{{ item.key | regex_replace('^spreadsheet_', '') }}":
+          {{ item.value | length }} data row(s),
+          columns = {{ item.value[0].keys() | list if item.value else [] }}
+      loop: "{{ workbook.ansible_facts | dict2items }}"
+      loop_control:
+        label: "{{ item.key }}"
+
+    - name: Print the first few rows of each tab as a sample
+      ansible.builtin.debug:
+        msg: "{{ item.value[:3] }}"
+      loop: "{{ workbook.ansible_facts | dict2items }}"
+      loop_control:
+        label: "{{ item.key }}"

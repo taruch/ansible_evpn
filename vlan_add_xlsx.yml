@@ -1,0 +1,104 @@
+---
+# Add a VLAN assignment directly in the .xlsx workbook (no CSV export step),
+# mirroring vlan_add.yml which does the same thing against the CSV export.
+#
+# The DataCenter tab already has one row per VLAN ID (1-4094); "adding" a
+# VLAN here means filling in that row's Assignment (and related) columns,
+# rather than appending a brand new row. If the tab already has a header row
+# but no row for vlan_id yet, xls_set_row appends one; a tab with no header
+# row at all (no columns) can't be targeted - there's no column layout to
+# match against.
+#
+# Requires openpyxl on whichever Python interpreter Ansible uses to run
+# modules - locally via `pip install openpyxl`, or via ansible-navigator with
+# an execution environment image that includes it, e.g.:
+#   ansible-navigator run -mstdout vlan_add_xlsx.yml \
+#     --eei=quay.io/truch/ee_spreasheet:1.2 -e ...
+#
+# Usage:
+#   ansible-playbook vlan_add_xlsx.yml -e vlan_id=1105 -e assignment=evpn-tenant3
+#   ansible-playbook vlan_add_xlsx.yml -e vlan_id=1105 -e assignment=evpn-tenant3 \
+#       -e ip_block=172.16.105.0 -e ip_mask=255.255.255.0 -e vrf=evpn-tenant3 \
+#       -e ticket=CHG0012345 -e 'comments="Added for new rack"'
+#
+# Note the quoting on any -e value containing spaces (e.g. comments): Ansible's
+# simple key=value extra-vars parser splits on whitespace, so a bare
+# -e comments="Added for new rack" silently truncates to "Added". Wrap the
+# value in its own quotes as shown above so Ansible sees it as one token.
+
+- name: Add a VLAN assignment directly to the XLSX workbook
+  hosts: localhost
+  connection: local
+  gather_facts: true
+
+  vars:
+    xlsx_file: "{{ playbook_dir }}/VLAN-Assignments-TEST-for-Ansible.xlsx"
+    tab_name: DataCenter
+    vlan_id: ""
+    assignment: ""
+    ip_block: ""
+    ip_mask: ""
+    vrf: ""
+    ticket: ""
+    comments: ""
+    assigned_by: "{{ lookup('env', 'USER') }}"
+
+  tasks:
+    - name: Require vlan_id and assignment
+      ansible.builtin.assert:
+        that:
+          - vlan_id != ""
+          - assignment != ""
+        fail_msg: >-
+          Pass -e vlan_id=<id> -e assignment=<name> (optionally -e ip_block=<ip>
+          -e ip_mask=<mask> -e vrf=<vrf> -e ticket=<ticket#> -e comments=<text>)
+
+    - name: Read the current tab
+      xls_to_facts:
+        src: "{{ xlsx_file }}"
+      register: workbook
+
+    - name: Find the row for this VLAN, if any
+      ansible.builtin.set_fact:
+        matching_rows: >-
+          {{
+            workbook.ansible_facts['spreadsheet_' + tab_name]
+            | default([])
+            | selectattr('VLAN', 'equalto', vlan_id | int)
+            | list
+          }}
+
+    - name: Note any existing assignment for this VLAN
+      ansible.builtin.set_fact:
+        existing_assignment: "{{ matching_rows[0].Assignment if (matching_rows | length > 0) else '' }}"
+
+    - name: Fail if the VLAN is already assigned
+      ansible.builtin.assert:
+        that: not existing_assignment
+        fail_msg: >-
+          VLAN {{ vlan_id }} is already assigned to '{{ existing_assignment }}'
+          in tab '{{ tab_name }}' - see vlan_lookup_xlsx.yml -e vlan_id={{ vlan_id }}
+
+    - name: Write the VLAN assignment into the workbook
+      xls_set_row:
+        src: "{{ xlsx_file }}"
+        sheet: "{{ tab_name }}"
+        key_column: VLAN
+        key_value: "{{ vlan_id | int }}"
+        values:
+          Used: "Yes"
+          Assignment: "{{ assignment }}"
+          Date: "{{ ansible_date_time.date }}"
+          Assigned By: "{{ assigned_by }}"
+          "IP Block": "{{ ip_block }}"
+          "IP Mask": "{{ ip_mask }}"
+          VRF: "{{ vrf }}"
+          "Ticket #": "{{ ticket }}"
+          Comments: "{{ comments }}"
+      register: result
+
+    - name: Confirm the VLAN was added
+      ansible.builtin.debug:
+        msg: >-
+          VLAN {{ vlan_id }} assigned to '{{ assignment }}' in tab '{{ tab_name }}'
+          of {{ xlsx_file }} (changed={{ result.changed }})
