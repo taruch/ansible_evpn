@@ -1,0 +1,99 @@
+---
+- name: GitOps check-in for the VLAN spreadsheet (v3)
+  # Expects these to already be set by the including playbook:
+  #   xlsx_file, xlsx_changed (bool - true if anything in the workbook changed),
+  #   commit_message
+  #
+  # v3 of gitops_checkin_xlsx.yml: generalized to commit a message describing
+  # more than one change to the workbook (the new assignment plus any drift
+  # rows flagged by vlan_assign_xlsx_v3.yml), instead of assuming exactly one
+  # VLAN/assignment pair changed.
+  #
+  # Credentials come from the AAP credential type "Git Token and Accessories"
+  # (e.g. credential "SPREADSHEET Git Credential"), which injects
+  # GITHUB_TOKEN / GIT_USERNAME / GIT_USER_EMAIL / GIT_REPO_URL as environment
+  # variables when attached to this Job Template - read here via ansible_env.
+  #
+  # playbook_dir (/runner/project in the EE) is NOT a git working tree - AAP
+  # stages the job's project directory as a plain file copy with no .git
+  # metadata. So this clones the repo fresh into a scratch directory, copies
+  # the already-updated workbook into it, and commits/pushes from there.
+  when: xlsx_changed | default(false)
+  block:
+    - name: Warn and skip check-in when no GitHub credentials are supplied
+      ansible.builtin.debug:
+        msg: >-
+          Skipping git check-in: attach the "Git Token and Accessories"
+          credential to this Job Template to commit and push this change.
+      when: >-
+        ansible_env.GITHUB_TOKEN | default('') == '' or
+        ansible_env.GIT_USERNAME | default('') == '' or
+        ansible_env.GIT_USER_EMAIL | default('') == '' or
+        ansible_env.GIT_REPO_URL | default('') == ''
+
+    - name: Commit and push the workbook change
+      when: >-
+        ansible_env.GITHUB_TOKEN | default('') != '' and
+        ansible_env.GIT_USERNAME | default('') != '' and
+        ansible_env.GIT_USER_EMAIL | default('') != '' and
+        ansible_env.GIT_REPO_URL | default('') != ''
+      block:
+        - name: Create a scratch directory for the check-in clone
+          ansible.builtin.tempfile:
+            state: directory
+            prefix: vlan-gitops-
+          register: checkin_dir
+
+        - name: Clone the repo into the scratch directory
+          ansible.builtin.git:
+            repo: >-
+              {{ ansible_env.GIT_REPO_URL
+                 | regex_replace('^https://',
+                   'https://' + ansible_env.GIT_USERNAME + ':' + ansible_env.GITHUB_TOKEN + '@') }}
+            dest: "{{ checkin_dir.path }}"
+            depth: 1
+          no_log: true
+
+        - name: Copy the updated workbook into the clone
+          ansible.builtin.copy:
+            src: "{{ xlsx_file }}"
+            dest: "{{ checkin_dir.path }}/{{ xlsx_file | basename }}"
+            remote_src: true
+
+        - name: Set git identity for this commit
+          ansible.builtin.command:
+            cmd: "git config user.{{ item.key }} {{ item.value }}"
+            chdir: "{{ checkin_dir.path }}"
+          loop:
+            - { key: "name", value: "{{ ansible_env.GIT_USERNAME }}" }
+            - { key: "email", value: "{{ ansible_env.GIT_USER_EMAIL }}" }
+          changed_when: false
+
+        - name: Stage the updated VLAN workbook
+          ansible.builtin.command:
+            cmd: "git add {{ xlsx_file | basename }}"
+            chdir: "{{ checkin_dir.path }}"
+          changed_when: false
+
+        - name: Commit the VLAN workbook update
+          ansible.builtin.command:
+            cmd: ["git", "commit", "-m", "{{ commit_message }}"]
+            chdir: "{{ checkin_dir.path }}"
+          register: checkin_commit
+          changed_when: "'nothing to commit' not in checkin_commit.stdout"
+          failed_when: >-
+            checkin_commit.rc != 0 and 'nothing to commit' not in checkin_commit.stdout
+
+        - name: Push the VLAN workbook update
+          ansible.builtin.command:
+            cmd: git push origin HEAD
+            chdir: "{{ checkin_dir.path }}"
+          when: checkin_commit.changed
+          no_log: true
+      always:
+        - name: Remove the scratch clone
+          ansible.builtin.file:
+            path: "{{ checkin_dir.path }}"
+            state: absent
+          when: checkin_dir is defined and checkin_dir.path is defined
+  ### End of GitOps Block

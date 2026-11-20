@@ -1,0 +1,83 @@
+---
+# v3 of vlan_switch_usage.yml: in addition to forwarding switch_used_vlans
+# (the flat list vlan_assign_xlsx.yml excludes from "next available"), this
+# also builds switch_vlan_map - VLAN ID -> the list of switches it was found
+# configured on - and forwards that too, so vlan_assign_xlsx_v3.yml can flag
+# any spreadsheet row for a VLAN that's live on a switch but not documented
+# as assigned, with a note pointing at exactly which switch(es) to go check.
+#
+# Meant to run as the first node in the AAP v3 workflow, before
+# vlan_assign_xlsx_v3.yml.
+#
+# Usage:
+#   ansible-playbook vlan_switch_usage_v3.yml
+#   ansible-playbook vlan_switch_usage_v3.yml -e _hosts=evpn_leaf
+
+- name: Gather in-use VLANs (and where they live) from the Cisco NX-OS switches
+  hosts: "{{ _hosts | default('all') }}"
+  gather_facts: false
+
+  vars:
+    # Only takes effect where the inventory doesn't already set these.
+    ansible_network_os: cisco.nxos.nxos
+    ansible_connection: ansible.netcommon.network_cli
+
+  tasks:
+    - name: Gather the VLANs currently configured on this switch
+      cisco.nxos.nxos_vlans:
+        state: gathered
+      register: vlan_facts
+
+    - name: Note the VLAN IDs configured on this switch
+      ansible.builtin.set_fact:
+        switch_vlan_ids: "{{ vlan_facts.gathered | default([]) | map(attribute='vlan_id') | map('int') | list }}"
+
+    - name: Combine the VLAN IDs in use across all checked switches
+      run_once: true
+      delegate_to: localhost
+      ansible.builtin.set_fact:
+        switch_used_vlans: >-
+          {{
+            ansible_play_hosts_all
+            | map('extract', hostvars, 'switch_vlan_ids')
+            | sum(start=[])
+            | unique
+            | list
+          }}
+
+    - name: Build the list of (hostvars, vlan_id) pairs to flatten per switch
+      run_once: true
+      delegate_to: localhost
+      ansible.builtin.set_fact:
+        host_vlan_entries: >-
+          {{
+            ansible_play_hosts_all
+            | map('extract', hostvars)
+            | list
+            | subelements('switch_vlan_ids', skip_missing=True)
+          }}
+
+    - name: Build the map of VLAN ID to the switches where it was found
+      run_once: true
+      delegate_to: localhost
+      ansible.builtin.set_fact:
+        switch_vlan_map: >-
+          {{
+            (switch_vlan_map | default({}))
+            | combine({
+                (item.1 | string):
+                  ((switch_vlan_map | default({}))[(item.1 | string)] | default([]))
+                  + [item.0.inventory_hostname]
+              })
+          }}
+      loop: "{{ host_vlan_entries }}"
+
+    - name: Pass the in-use VLAN data to the next node in the workflow
+      run_once: true
+      delegate_to: localhost
+      ansible.builtin.set_stats:
+        data:
+          switch_used_vlans: "{{ switch_used_vlans }}"
+          switch_vlan_map: "{{ switch_vlan_map | default({}) }}"
+        aggregate: false
+        per_host: false

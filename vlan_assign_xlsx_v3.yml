@@ -1,0 +1,215 @@
+---
+# v3 of vlan_assign_xlsx.yml: on top of finding/writing the next available
+# VLAN, also flags any OTHER row in the spreadsheet for a VLAN that's live on
+# a switch (per switch_vlan_map, an extra_var - in the AAP workflow this
+# arrives as the set_stats artifact from vlan_switch_usage_v3.yml, which
+# should run as the node just before this one) but has no Assignment on
+# record - i.e. configured drift the spreadsheet doesn't know about. Each
+# flagged row's Comments note exactly which switch(es) to go check.
+#
+# vlan_next_available_xlsx.yml, vlan_add_xlsx.yml, and vlan_assign_xlsx.yml
+# (v1/v2) are untouched by this - v3 is a separate, parallel set of
+# playbooks/job templates.
+#
+# If vlan_id isn't given, automatically picks the next free VLAN ID in
+# vlan_range_start-vlan_range_end: free meaning not already Assignment-ed in
+# the spreadsheet AND not in switch_used_vlans. Pass -e vlan_id=<id> instead
+# to assign a specific VLAN rather than auto-picking one.
+#
+# Requires openpyxl on whichever Python interpreter Ansible uses to run
+# modules - locally via `pip install openpyxl`, or via ansible-navigator with
+# an execution environment image that includes it, e.g.:
+#   ansible-navigator run -mstdout vlan_assign_xlsx_v3.yml \
+#     --eei=quay.io/truch/ee_spreasheet:1.2 -e ...
+#
+# Usage:
+#   ansible-playbook vlan_assign_xlsx_v3.yml -e assignment=evpn-tenant3
+#   ansible-playbook vlan_assign_xlsx_v3.yml -e vlan_id=1105 -e assignment=evpn-tenant3
+
+- name: Find the next available VLAN, assign it, and flag undocumented switch VLANs
+  hosts: localhost
+  connection: local
+  gather_facts: true
+
+  vars:
+    xlsx_file: "{{ playbook_dir }}/VLAN-Assignments-TEST-for-Ansible.xlsx"
+    tab_name: DataCenter
+    vlan_id: ""
+    vlan_range_start: 2
+    vlan_range_end: 4094
+    assignment: ""
+    ip_block: ""
+    ip_mask: ""
+    vrf: ""
+    ticket: ""
+    comments: ""
+    assigned_by: "{{ lookup('env', 'USER') }}"
+
+  tasks:
+    - name: Require assignment
+      ansible.builtin.assert:
+        that: assignment != ""
+        fail_msg: >-
+          Pass -e assignment=<name> (optionally -e vlan_id=<id> to assign a
+          specific VLAN instead of auto-picking the next available one,
+          -e ip_block=<ip> -e ip_mask=<mask> -e vrf=<vrf> -e ticket=<ticket#>
+          -e comments=<text>)
+
+    - name: Read the current tab
+      xls_to_facts:
+        src: "{{ xlsx_file }}"
+      register: workbook
+
+    - name: Fail if the tab doesn't exist in the workbook
+      ansible.builtin.assert:
+        that: ('spreadsheet_' + tab_name) in workbook.ansible_facts
+        fail_msg: >-
+          Tab '{{ tab_name }}' not found in {{ xlsx_file }}. Available tabs:
+          {{ workbook.ansible_facts.keys() | map('regex_replace', '^spreadsheet_', '') | list }}
+
+    - name: Select the requested tab
+      ansible.builtin.set_fact:
+        vlan_rows: "{{ workbook.ansible_facts['spreadsheet_' + tab_name] }}"
+
+    - name: Build the list of VLAN IDs already documented in the spreadsheet
+      ansible.builtin.set_fact:
+        documented_vlans: >-
+          {{
+            vlan_rows
+            | rejectattr('Assignment', 'equalto', None)
+            | map(attribute='VLAN')
+            | select('number')
+            | map('int')
+            | list
+          }}
+
+    - name: Pick the next available VLAN ID when one wasn't given
+      when: vlan_id | string == ''
+      block:
+        - name: Fold in VLAN IDs already configured live on the switches
+          ansible.builtin.set_fact:
+            used_vlans: "{{ (documented_vlans + (switch_used_vlans | default([]))) | unique | list }}"
+
+        - name: Build the list of candidate VLAN IDs still free in the requested range
+          ansible.builtin.set_fact:
+            available_vlans: >-
+              {{
+                range(vlan_range_start | int, (vlan_range_end | int) + 1)
+                | list
+                | difference(used_vlans)
+                | sort
+              }}
+
+        - name: Fail if the whole range is used up
+          ansible.builtin.assert:
+            that: available_vlans | length > 0
+            fail_msg: >-
+              No free VLAN ID between {{ vlan_range_start }} and {{ vlan_range_end }}
+              in tab '{{ tab_name }}' - all {{ used_vlans | length }} are in use
+
+        - name: Use the next available VLAN ID
+          ansible.builtin.set_fact:
+            vlan_id: "{{ available_vlans[0] }}"
+
+    - name: Find the row for this VLAN, if any
+      ansible.builtin.set_fact:
+        matching_rows: >-
+          {{
+            vlan_rows
+            | selectattr('VLAN', 'equalto', vlan_id | int)
+            | list
+          }}
+
+    - name: Note any existing assignment for this VLAN
+      ansible.builtin.set_fact:
+        existing_assignment: "{{ matching_rows[0].Assignment if (matching_rows | length > 0) else '' }}"
+
+    - name: Fail if the VLAN is already assigned
+      ansible.builtin.assert:
+        that: not existing_assignment
+        fail_msg: >-
+          VLAN {{ vlan_id }} is already assigned to '{{ existing_assignment }}'
+          in tab '{{ tab_name }}' - see vlan_lookup_xlsx.yml -e vlan_id={{ vlan_id }}
+
+    - name: Write the VLAN assignment into the workbook
+      xls_set_row:
+        src: "{{ xlsx_file }}"
+        sheet: "{{ tab_name }}"
+        key_column: VLAN
+        key_value: "{{ vlan_id | int }}"
+        values:
+          Used: "Yes"
+          Assignment: "{{ assignment }}"
+          Date: "{{ ansible_date_time.date }}"
+          Assigned By: "{{ assigned_by }}"
+          "IP Block": "{{ ip_block }}"
+          "IP Mask": "{{ ip_mask }}"
+          VRF: "{{ vrf }}"
+          "Ticket #": "{{ ticket }}"
+          Comments: "{{ comments }}"
+      register: result
+
+    - name: Confirm the VLAN was added
+      ansible.builtin.debug:
+        msg: >-
+          VLAN {{ vlan_id }} assigned to '{{ assignment }}' in tab '{{ tab_name }}'
+          of {{ xlsx_file }} (changed={{ result.changed }})
+
+    - name: Determine which switch-found VLANs are undocumented in the spreadsheet
+      ansible.builtin.set_fact:
+        drift_vlans: >-
+          {{
+            (switch_vlan_map | default({}))
+            | dict2items
+            | selectattr('key', 'ne', vlan_id | string)
+            | rejectattr('key', 'in', documented_vlans | map('string') | list)
+            | list
+          }}
+
+    - name: Flag undocumented switch VLANs in the spreadsheet for review
+      xls_set_row:
+        src: "{{ xlsx_file }}"
+        sheet: "{{ tab_name }}"
+        key_column: VLAN
+        key_value: "{{ item.key | int }}"
+        values:
+          Used: "Yes"
+          Assignment: "NEEDS REVIEW"
+          Date: "{{ ansible_date_time.date }}"
+          Assigned By: "AAP Drift Detection"
+          Comments: >-
+            Found configured on switch(es): {{ item.value | join(', ') }}
+            (detected {{ ansible_date_time.date }}) - go verify on the switch
+            and correct this row.
+      loop: "{{ drift_vlans }}"
+      loop_control:
+        label: "VLAN {{ item.key }}"
+      register: drift_results
+
+    - name: Report any drift VLANs flagged for review
+      ansible.builtin.debug:
+        msg: >-
+          Flagged VLAN {{ item.key }} - found on switch(es)
+          {{ item.value | join(', ') }} but not documented in the spreadsheet.
+      loop: "{{ drift_vlans }}"
+      loop_control:
+        label: "VLAN {{ item.key }}"
+
+    - name: Note whether anything in the workbook changed
+      ansible.builtin.set_fact:
+        xlsx_changed: >-
+          {{
+            result.changed
+            or (drift_results.results | default([]) | selectattr('changed') | list | length > 0)
+          }}
+
+    - name: Build the git commit message
+      ansible.builtin.set_fact:
+        commit_message: >-
+          VLAN {{ vlan_id }} assigned to {{ assignment }}{{
+            ('; flagged ' + (drift_vlans | length | string) + ' undocumented switch VLAN(s) for review')
+            if (drift_vlans | default([]) | length > 0) else ''
+          }} ({{ now().strftime('%Y-%m-%d %H:%M:%S') }})
+
+    - name: Check the updated workbook into git
+      ansible.builtin.import_tasks: gitops_checkin_xlsx_v3.yml
