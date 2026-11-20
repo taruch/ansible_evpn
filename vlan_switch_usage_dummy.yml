@@ -1,0 +1,69 @@
+---
+# Dummy stand-in for vlan_switch_usage.yml, for testing the "skip a VLAN
+# that's already in use on a switch" path end to end without needing real
+# Cisco switch connectivity.
+#
+# Reads the spreadsheet to find out what "next available" would currently be
+# with no switch exclusion, then reports THAT VLAN plus one extra as the
+# switch_used_vlans artifact - the next node (vlan_assign_xlsx.yml or
+# vlan_next_available_xlsx.yml) should visibly skip over it and pick a
+# different one instead.
+#
+# Swap this in for vlan_switch_usage.yml as the first node in the AAP
+# workflow temporarily to verify the exclusion logic, then swap back.
+#
+# Usage:
+#   ansible-playbook vlan_switch_usage_dummy.yml
+
+- name: Fake switch VLAN usage for testing the exclusion logic
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars:
+    xlsx_file: "{{ playbook_dir }}/VLAN-Assignments-TEST-for-Ansible.xlsx"
+    tab_name: DataCenter
+
+  tasks:
+    - name: Read the current tab
+      xls_to_facts:
+        src: "{{ xlsx_file }}"
+      register: workbook
+
+    - name: Select the requested tab
+      ansible.builtin.set_fact:
+        vlan_rows: "{{ workbook.ansible_facts['spreadsheet_' + tab_name] }}"
+
+    - name: Build the list of VLAN IDs already in use (rows with an Assignment)
+      ansible.builtin.set_fact:
+        used_vlans: >-
+          {{
+            vlan_rows
+            | rejectattr('Assignment', 'equalto', None)
+            | map(attribute='VLAN')
+            | select('number')
+            | map('int')
+            | list
+          }}
+
+    - name: Find what "next available" would be with no switch exclusion
+      ansible.builtin.set_fact:
+        real_next_available: "{{ (range(2, 4095) | list | difference(used_vlans) | sort)[0] }}"
+
+    - name: Fake two VLANs as already in use on a switch, including the real next available one
+      ansible.builtin.set_fact:
+        switch_used_vlans: "{{ [real_next_available | int, (real_next_available | int) + 1] }}"
+
+    - name: Report the fake switch usage being sent
+      ansible.builtin.debug:
+        msg: >-
+          Faking switch_used_vlans={{ switch_used_vlans }} - this includes the
+          real next-available VLAN ({{ real_next_available }}), so the next
+          node should skip it and pick a different one instead.
+
+    - name: Pass the fake in-use VLAN list to the next node in the workflow
+      ansible.builtin.set_stats:
+        data:
+          switch_used_vlans: "{{ switch_used_vlans }}"
+        aggregate: false
+        per_host: false
