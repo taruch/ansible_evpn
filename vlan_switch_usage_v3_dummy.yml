@@ -1,0 +1,87 @@
+---
+# Dummy stand-in for vlan_switch_usage_v3.yml, for testing both the "skip a
+# VLAN already in use on a switch" and "flag undocumented switch VLANs" paths
+# end to end without needing real Cisco switch connectivity.
+#
+# Reads the spreadsheet to find out what "next available" would currently be
+# with no switch exclusion, then builds switch_vlan_map (VLAN ID -> list of
+# fake switch hostnames) covering that VLAN, the one after it, and one more
+# arbitrary VLAN further out - and derives switch_used_vlans from its keys,
+# exactly like the real playbook does. vlan_assign_xlsx_v3.yml should skip
+# the first two when auto-picking, and flag all three (if undocumented) with
+# a note naming the fake switch(es).
+#
+# Swap this in for vlan_switch_usage_v3.yml as the first node in the AAP v3
+# workflow temporarily to verify the logic, then swap back.
+#
+# Usage:
+#   ansible-playbook vlan_switch_usage_v3_dummy.yml
+
+- name: Fake switch VLAN usage (with switch attribution) for testing v3
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars:
+    xlsx_file: "{{ playbook_dir }}/VLAN-Assignments-TEST-for-Ansible.xlsx"
+    tab_name: DataCenter
+
+  tasks:
+    - name: Read the current tab
+      xls_to_facts:
+        src: "{{ xlsx_file }}"
+      register: workbook
+
+    - name: Select the requested tab
+      ansible.builtin.set_fact:
+        vlan_rows: "{{ workbook.ansible_facts['spreadsheet_' + tab_name] }}"
+
+    - name: Build the list of VLAN IDs already in use (rows with an Assignment)
+      ansible.builtin.set_fact:
+        used_vlans: >-
+          {{
+            vlan_rows
+            | rejectattr('Assignment', 'equalto', None)
+            | map(attribute='VLAN')
+            | select('number')
+            | map('int')
+            | list
+          }}
+
+    - name: Find what "next available" would be with no switch exclusion
+      ansible.builtin.set_fact:
+        real_next_available: "{{ (range(2, 4095) | list | difference(used_vlans) | sort)[0] | int }}"
+
+    - name: Fake a map of VLAN ID to the switches where it was found
+      # Built as a single Jinja expression, not a YAML mapping with templated
+      # keys - Ansible only templates dict *values* in module args, so keys
+      # written as literal "{{ ... }}": ... strings never get evaluated.
+      ansible.builtin.set_fact:
+        switch_vlan_map: >-
+          {{
+            {
+              real_next_available | string: ['leaf1'],
+              ((real_next_available | int) + 1) | string: ['leaf1', 'leaf2'],
+              ((real_next_available | int) + 5) | string: ['spine1']
+            }
+          }}
+
+    - name: Derive switch_used_vlans from the fake map, same as the real playbook
+      ansible.builtin.set_fact:
+        switch_used_vlans: "{{ switch_vlan_map.keys() | map('int') | list }}"
+
+    - name: Report the fake switch usage being sent
+      ansible.builtin.debug:
+        msg: >-
+          Faking switch_vlan_map={{ switch_vlan_map }} - includes the real
+          next-available VLAN ({{ real_next_available }}), so
+          vlan_assign_xlsx_v3.yml should skip it when auto-picking, and flag
+          any of these not already documented in the spreadsheet.
+
+    - name: Pass the fake in-use VLAN data to the next node in the workflow
+      ansible.builtin.set_stats:
+        data:
+          switch_used_vlans: "{{ switch_used_vlans }}"
+          switch_vlan_map: "{{ switch_vlan_map }}"
+        aggregate: false
+        per_host: false
