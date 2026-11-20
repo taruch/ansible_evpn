@@ -1,0 +1,56 @@
+---
+# Gather every VLAN ID currently configured across the Cisco NX-OS switches
+# in _hosts (default 'all'), and forward the combined list forward in the AAP
+# workflow as the switch_used_vlans artifact.
+#
+# Meant to run as the first node in the AAP workflow, before
+# vlan_next_available_xlsx.yml, which folds switch_used_vlans into its own
+# exclusion list so "next available" never hands out a VLAN that's already
+# live on the fabric - without needing a workflow-level retry loop (AAP
+# workflows are a DAG - there's no way to loop back to an earlier node, and a
+# plain node-retry wouldn't change the spreadsheet-based answer anyway).
+#
+# Usage:
+#   ansible-playbook vlan_switch_usage.yml
+#   ansible-playbook vlan_switch_usage.yml -e _hosts=evpn_leaf
+
+- name: Gather in-use VLANs from the Cisco NX-OS switches
+  hosts: "{{ _hosts | default('all') }}"
+  gather_facts: false
+
+  vars:
+    # Only takes effect where the inventory doesn't already set these.
+    ansible_network_os: cisco.nxos.nxos
+    ansible_connection: ansible.netcommon.network_cli
+
+  tasks:
+    - name: Gather the VLANs currently configured on this switch
+      cisco.nxos.nxos_vlans:
+        state: gathered
+      register: vlan_facts
+
+    - name: Note the VLAN IDs configured on this switch
+      ansible.builtin.set_fact:
+        switch_vlan_ids: "{{ vlan_facts.gathered | default([]) | map(attribute='vlan_id') | map('int') | list }}"
+
+    - name: Combine the VLAN IDs in use across all checked switches
+      run_once: true
+      delegate_to: localhost
+      ansible.builtin.set_fact:
+        switch_used_vlans: >-
+          {{
+            ansible_play_hosts_all
+            | map('extract', hostvars, 'switch_vlan_ids')
+            | sum(start=[])
+            | unique
+            | list
+          }}
+
+    - name: Pass the in-use VLAN list to the next node in the workflow
+      run_once: true
+      delegate_to: localhost
+      ansible.builtin.set_stats:
+        data:
+          switch_used_vlans: "{{ switch_used_vlans }}"
+        aggregate: false
+        per_host: false

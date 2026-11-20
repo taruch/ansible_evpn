@@ -1,15 +1,21 @@
 ---
 # Find the next free VLAN ID by reading directly from the .xlsx workbook (no
 # CSV export step) with the xls_to_facts module, then diffing a numeric range
-# against the IDs already in use. Mirrors vlan_next_available.yml, which does
-# the same thing from a CSV export - see that playbook's comments for why a
-# CSV-only version also exists.
+# against the IDs already in use.
 #
 # openpyxl must be installed wherever Ansible runs the module - locally via
 # `pip install openpyxl`, or use ansible-navigator with an execution
 # environment image that includes it, e.g.:
 #   ansible-navigator run -mstdout vlan_next_available_xlsx.yml \
 #     -eei=quay.io/truch/ee_spreasheet:1.2
+#
+# Also excludes any VLAN ID in switch_used_vlans, a list fed in as an
+# extra_var - in the AAP workflow this arrives as the set_stats artifact from
+# vlan_switch_usage.yml, which should run as the node just before this one.
+# That keeps "next available" from ever handing out a VLAN that's already
+# live on the fabric, without needing a workflow-level retry loop (AAP
+# workflows are a DAG - there's no way to loop back to an earlier node, and a
+# plain node-retry wouldn't change the spreadsheet-based answer anyway).
 #
 # Usage:
 #   ansible-playbook vlan_next_available_xlsx.yml
@@ -55,6 +61,10 @@
             | map('int')
             | list
           }}
+
+    - name: Fold in VLAN IDs already configured live on the switches
+      ansible.builtin.set_fact:
+        used_vlans: "{{ (used_vlans + (switch_used_vlans | default([]))) | unique | list }}"
 
     - name: Build the list of candidate VLAN IDs still free in the requested range
       ansible.builtin.set_fact:
