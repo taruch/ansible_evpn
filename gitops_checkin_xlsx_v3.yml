@@ -77,7 +77,11 @@
 
         - name: Commit the VLAN workbook update
           ansible.builtin.command:
-            cmd: ["git", "commit", "-m", "{{ commit_message }}"]
+            argv:
+              - git
+              - commit
+              - -m
+              - "{{ commit_message }}"
             chdir: "{{ checkin_dir.path }}"
           register: checkin_commit
           changed_when: "'nothing to commit' not in checkin_commit.stdout"
