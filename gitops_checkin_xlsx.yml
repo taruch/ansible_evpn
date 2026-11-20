@@ -4,10 +4,14 @@
   #   xlsx_file, vlan_id, assignment, result (registered from the write task)
   #
   # Credentials come from the AAP credential type "Git Token and Accessories"
-  # (id=37), which injects GITHUB_TOKEN / GIT_USERNAME / GIT_USER_EMAIL as
-  # environment variables when attached to this Job Template - read here via
-  # ansible_env, not as extra_vars. Requires gather_facts: true in the
-  # including play so ansible_env is populated.
+  # (e.g. credential "SPREADSHEET Git Credential"), which injects
+  # GITHUB_TOKEN / GIT_USERNAME / GIT_USER_EMAIL / GIT_REPO_URL as environment
+  # variables when attached to this Job Template - read here via ansible_env.
+  #
+  # playbook_dir (/runner/project in the EE) is NOT a git working tree - AAP
+  # stages the job's project directory as a plain file copy with no .git
+  # metadata. So this clones the repo fresh into a scratch directory, copies
+  # the already-updated workbook into it, and commits/pushes from there.
   when: result.changed | default(false)
   block:
     - name: Warn and skip check-in when no GitHub credentials are supplied
@@ -18,22 +22,46 @@
       when: >-
         ansible_env.GITHUB_TOKEN | default('') == '' or
         ansible_env.GIT_USERNAME | default('') == '' or
-        ansible_env.GIT_USER_EMAIL | default('') == ''
+        ansible_env.GIT_USER_EMAIL | default('') == '' or
+        ansible_env.GIT_REPO_URL | default('') == ''
 
     - name: Commit and push the workbook change
       when: >-
         ansible_env.GITHUB_TOKEN | default('') != '' and
         ansible_env.GIT_USERNAME | default('') != '' and
-        ansible_env.GIT_USER_EMAIL | default('') != ''
+        ansible_env.GIT_USER_EMAIL | default('') != '' and
+        ansible_env.GIT_REPO_URL | default('') != ''
       block:
+        - name: Create a scratch directory for the check-in clone
+          ansible.builtin.tempfile:
+            state: directory
+            prefix: vlan-gitops-
+          register: checkin_dir
+
+        - name: Clone the repo into the scratch directory
+          ansible.builtin.git:
+            repo: >-
+              {{ ansible_env.GIT_REPO_URL
+                 | regex_replace('^https://',
+                   'https://' + ansible_env.GIT_USERNAME + ':' + ansible_env.GITHUB_TOKEN + '@') }}
+            dest: "{{ checkin_dir.path }}"
+            depth: 1
+          no_log: true
+
         - name: Set date_time variable
           ansible.builtin.set_fact:
             date_time: "{{ now().strftime('%Y-%m-%d %H:%M:%S') }}"
 
+        - name: Copy the updated workbook into the clone
+          ansible.builtin.copy:
+            src: "{{ xlsx_file }}"
+            dest: "{{ checkin_dir.path }}/{{ xlsx_file | basename }}"
+            remote_src: true
+
         - name: Set git identity for this commit
           ansible.builtin.command:
             cmd: "git config user.{{ item.key }} {{ item.value }}"
-            chdir: "{{ playbook_dir }}"
+            chdir: "{{ checkin_dir.path }}"
           loop:
             - { key: "name", value: "{{ ansible_env.GIT_USERNAME }}" }
             - { key: "email", value: "{{ ansible_env.GIT_USER_EMAIL }}" }
@@ -41,51 +69,30 @@
 
         - name: Stage the updated VLAN workbook
           ansible.builtin.command:
-            cmd: "git add {{ xlsx_file }}"
-            chdir: "{{ playbook_dir }}"
+            cmd: "git add {{ xlsx_file | basename }}"
+            chdir: "{{ checkin_dir.path }}"
           changed_when: false
 
         - name: Commit the VLAN workbook update
           ansible.builtin.command:
             cmd: >-
               git commit -m "VLAN {{ vlan_id }} assigned to {{ assignment }} ({{ date_time }})"
-            chdir: "{{ playbook_dir }}"
+            chdir: "{{ checkin_dir.path }}"
           register: checkin_commit
           changed_when: "'nothing to commit' not in checkin_commit.stdout"
           failed_when: >-
             checkin_commit.rc != 0 and 'nothing to commit' not in checkin_commit.stdout
 
-        - name: Capture the current origin URL
-          ansible.builtin.command: git remote get-url origin
-          args:
-            chdir: "{{ playbook_dir }}"
-          register: origin_url
-          changed_when: false
-          when: checkin_commit.changed
-
         - name: Push the VLAN workbook update
+          ansible.builtin.command:
+            cmd: git push origin HEAD
+            chdir: "{{ checkin_dir.path }}"
           when: checkin_commit.changed
-          block:
-            - name: Set remote URL with credentials for push
-              ansible.builtin.command:
-                cmd: >-
-                  git remote set-url origin
-                  {{ origin_url.stdout
-                     | regex_replace('^git@([^:]+):(.*)$',
-                       'https://' + ansible_env.GIT_USERNAME + ':' + ansible_env.GITHUB_TOKEN + '@\1/\2') }}
-                chdir: "{{ playbook_dir }}"
-              changed_when: false
-              no_log: true
-
-            - name: Push the commit
-              ansible.builtin.command:
-                cmd: git push origin HEAD
-                chdir: "{{ playbook_dir }}"
-              no_log: true
-          always:
-            - name: Restore remote URL without embedded credentials
-              ansible.builtin.command:
-                cmd: "git remote set-url origin {{ origin_url.stdout }}"
-                chdir: "{{ playbook_dir }}"
-              changed_when: false
+          no_log: true
+      always:
+        - name: Remove the scratch clone
+          ansible.builtin.file:
+            path: "{{ checkin_dir.path }}"
+            state: absent
+          when: checkin_dir is defined and checkin_dir.path is defined
   ### End of GitOps Block
