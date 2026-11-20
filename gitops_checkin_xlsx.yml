@@ -1,0 +1,80 @@
+---
+- name: GitOps check-in for the VLAN spreadsheet
+  # Expects these to already be set by the including playbook:
+  #   xlsx_file, vlan_id, assignment, result (registered from the write task)
+  # Credentials come from an AAP credential (e.g. a Custom Credential Type)
+  # injecting github_username / github_token / github_email as extra vars -
+  # github_token should be a GitHub Personal Access Token with repo scope.
+  when: result.changed | default(false)
+  block:
+    - name: Warn and skip check-in when no GitHub credentials are supplied
+      ansible.builtin.debug:
+        msg: >-
+          Skipping git check-in: github_username/github_token were not provided.
+          Supply them (e.g. via an AAP credential) to commit and push this change.
+      when: github_token | default('') == ''
+
+    - name: Commit and push the workbook change
+      when: github_token | default('') != ''
+      block:
+        - name: Set date_time variable
+          ansible.builtin.set_fact:
+            date_time: "{{ now().strftime('%Y-%m-%d %H:%M:%S') }}"
+
+        - name: Set git identity for this commit
+          ansible.builtin.command:
+            cmd: "git config user.{{ item.key }} {{ item.value }}"
+            chdir: "{{ playbook_dir }}"
+          loop:
+            - { key: "name", value: "{{ github_username }}" }
+            - { key: "email", value: "{{ github_email }}" }
+          changed_when: false
+
+        - name: Stage the updated VLAN workbook
+          ansible.builtin.command:
+            cmd: "git add {{ xlsx_file }}"
+            chdir: "{{ playbook_dir }}"
+          changed_when: false
+
+        - name: Commit the VLAN workbook update
+          ansible.builtin.command:
+            cmd: >-
+              git commit -m "VLAN {{ vlan_id }} assigned to {{ assignment }} ({{ date_time }})"
+            chdir: "{{ playbook_dir }}"
+          register: checkin_commit
+          changed_when: "'nothing to commit' not in checkin_commit.stdout"
+          failed_when: >-
+            checkin_commit.rc != 0 and 'nothing to commit' not in checkin_commit.stdout
+
+        - name: Capture the current origin URL
+          ansible.builtin.command: git remote get-url origin
+          args:
+            chdir: "{{ playbook_dir }}"
+          register: origin_url
+          changed_when: false
+          when: checkin_commit.changed
+
+        - name: Push the VLAN workbook update
+          when: checkin_commit.changed
+          block:
+            - name: Set remote URL with credentials for push
+              ansible.builtin.command:
+                cmd: >-
+                  git remote set-url origin
+                  https://{{ github_username }}:{{ github_token }}@github.com/taruch/ansible_evpn.git
+                chdir: "{{ playbook_dir }}"
+              changed_when: false
+              no_log: true
+
+            - name: Push the commit
+              ansible.builtin.command:
+                cmd: git push origin HEAD
+                chdir: "{{ playbook_dir }}"
+              no_log: true
+          always:
+            - name: Restore remote URL without embedded credentials
+              ansible.builtin.command:
+                cmd: "git remote set-url origin {{ origin_url.stdout }}"
+                chdir: "{{ playbook_dir }}"
+              changed_when: false
+  ### End of GitOps Block
