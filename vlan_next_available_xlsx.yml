@@ -79,3 +79,10 @@
           Next available VLAN ID in tab '{{ tab_name }}', range
           {{ vlan_range_start }}-{{ vlan_range_end }}, is {{ available_vlans[0] }}
           ({{ available_vlans | length }} free total)
+
+    - name: Pass the VLAN ID to the next node in the workflow
+      ansible.builtin.set_stats:
+        data:
+          vlan_id: "{{ available_vlans[0] }}"
+        aggregate: false
+        per_host: false
