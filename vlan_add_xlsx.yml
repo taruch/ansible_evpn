@@ -42,6 +42,9 @@
     ticket: ""
     comments: ""
     assigned_by: "{{ lookup('env', 'USER') }}"
+    github_username: ""
+    github_token: ""
+    github_email: ""
 
   tasks:
     - name: Require vlan_id and assignment
@@ -102,3 +105,6 @@
         msg: >-
           VLAN {{ vlan_id }} assigned to '{{ assignment }}' in tab '{{ tab_name }}'
           of {{ xlsx_file }} (changed={{ result.changed }})
+
+    - name: Check the updated workbook into git
+      ansible.builtin.import_tasks: gitops_checkin_xlsx.yml
