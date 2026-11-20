@@ -42,9 +42,6 @@
     ticket: ""
     comments: ""
     assigned_by: "{{ lookup('env', 'USER') }}"
-    github_username: ""
-    github_token: ""
-    github_email: ""
 
   tasks:
     - name: Require vlan_id and assignment

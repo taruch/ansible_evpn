@@ -2,20 +2,29 @@
 - name: GitOps check-in for the VLAN spreadsheet
   # Expects these to already be set by the including playbook:
   #   xlsx_file, vlan_id, assignment, result (registered from the write task)
-  # Credentials come from an AAP credential (e.g. a Custom Credential Type)
-  # injecting github_username / github_token / github_email as extra vars -
-  # github_token should be a GitHub Personal Access Token with repo scope.
+  #
+  # Credentials come from the AAP credential type "Git Token and Accessories"
+  # (id=37), which injects GITHUB_TOKEN / GIT_USERNAME / GIT_USER_EMAIL as
+  # environment variables when attached to this Job Template - read here via
+  # ansible_env, not as extra_vars. Requires gather_facts: true in the
+  # including play so ansible_env is populated.
   when: result.changed | default(false)
   block:
     - name: Warn and skip check-in when no GitHub credentials are supplied
       ansible.builtin.debug:
         msg: >-
-          Skipping git check-in: github_username/github_token were not provided.
-          Supply them (e.g. via an AAP credential) to commit and push this change.
-      when: github_token | default('') == ''
+          Skipping git check-in: attach the "Git Token and Accessories"
+          credential to this Job Template to commit and push this change.
+      when: >-
+        ansible_env.GITHUB_TOKEN | default('') == '' or
+        ansible_env.GIT_USERNAME | default('') == '' or
+        ansible_env.GIT_USER_EMAIL | default('') == ''
 
     - name: Commit and push the workbook change
-      when: github_token | default('') != ''
+      when: >-
+        ansible_env.GITHUB_TOKEN | default('') != '' and
+        ansible_env.GIT_USERNAME | default('') != '' and
+        ansible_env.GIT_USER_EMAIL | default('') != ''
       block:
         - name: Set date_time variable
           ansible.builtin.set_fact:
@@ -26,8 +35,8 @@
             cmd: "git config user.{{ item.key }} {{ item.value }}"
             chdir: "{{ playbook_dir }}"
           loop:
-            - { key: "name", value: "{{ github_username }}" }
-            - { key: "email", value: "{{ github_email }}" }
+            - { key: "name", value: "{{ ansible_env.GIT_USERNAME }}" }
+            - { key: "email", value: "{{ ansible_env.GIT_USER_EMAIL }}" }
           changed_when: false
 
         - name: Stage the updated VLAN workbook
@@ -61,7 +70,9 @@
               ansible.builtin.command:
                 cmd: >-
                   git remote set-url origin
-                  https://{{ github_username }}:{{ github_token }}@github.com/taruch/ansible_evpn.git
+                  {{ origin_url.stdout
+                     | regex_replace('^git@([^:]+):(.*)$',
+                       'https://' + ansible_env.GIT_USERNAME + ':' + ansible_env.GITHUB_TOKEN + '@\1/\2') }}
                 chdir: "{{ playbook_dir }}"
               changed_when: false
               no_log: true
